@@ -6,6 +6,7 @@ import rateLimit from "express-rate-limit";
 import { env } from "./config/env.config.js";
 import { pool, test_db_connection } from "./config/db.js";
 import health_routes from "./routes/health.routes.js";
+
 import {
   not_found_handler,
   error_handler,
@@ -13,6 +14,8 @@ import {
 
 import auth_routes from "./routes/auth.routes.js";
 import user_routes from "./routes/user.routes.js";
+import project_routes from "./routes/project.routes.js";
+
 
 dotenv.config();
 
@@ -76,13 +79,16 @@ app.use("/api", global_limiter);
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
+
+
+app.use("/api/health", health_routes);
+app.use("/api/auth", auth_routes);
+app.use("/api/users", user_routes);
+app.use("/api/projects", project_routes);
+
 // 404 & Centralized Error Handlers
 app.use(not_found_handler);
 app.use(error_handler);
-
-app.use("/api/auth", auth_routes);
-app.use("/api/users", user_routes);
-app.use("/api/health", health_routes);
 
 app.get("/", (req, res) => {
   res.send("Backend Server is running 🚀");

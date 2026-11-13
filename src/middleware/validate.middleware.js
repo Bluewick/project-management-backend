@@ -135,6 +135,15 @@ const validate_field = (location, field, value, rules, errors) => {
   return normalized;
 };
 
+const assign_validated_location = (req, location, sanitized) => {
+  Object.defineProperty(req, location, {
+    value: sanitized,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+};
+
 export const validate_request = (schema) => {
   return (req, res, next) => {
     const errors = [];
@@ -147,16 +156,18 @@ export const validate_request = (schema) => {
       const sanitized = { ...source };
 
       for (const [field, rules] of Object.entries(location_schema)) {
-        sanitized[field] = validate_field(
-          location,
-          field,
-          source[field],
-          rules,
-          errors
-        );
+        if (source[field] !== undefined || rules.required) {
+          sanitized[field] = validate_field(
+            location,
+            field,
+            source[field],
+            rules,
+            errors
+          );
+        }
       }
 
-      req[location] = sanitized;
+      assign_validated_location(req, location, sanitized);
     }
 
     if (errors.length > 0) {

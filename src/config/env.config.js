@@ -40,4 +40,5 @@ export const env = Object.freeze({
   jwt_refresh_secret: process.env.JWT_REFRESH_SECRET,
   jwt_refresh_expires_in: process.env.JWT_REFRESH_EXPIRES_IN || "7d",
   bcrypt_salt_rounds: parse_integer(process.env.BCRYPT_SALT_ROUNDS, 12),
+  invite_expires_hours: parse_integer(process.env.INVITE_EXPIRES_HOURS, 168),
 });
