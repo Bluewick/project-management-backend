@@ -56,6 +56,7 @@ export const update_issue = async_handler(async (req, res) => {
   const updated = await update_issue_details(
     req.project,
     req.params.issueId,
+    req.user.id,
     req.body
   );
 
@@ -66,6 +67,7 @@ export const move_issue = async_handler(async (req, res) => {
   const moved = await move_kanban_issue(
     req.project,
     req.params.issueId,
+    req.user.id,
     req.body
   );
 
@@ -86,7 +88,8 @@ export const attach_label = async_handler(async (req, res) => {
   const issue = await add_label_to_issue(
     req.project,
     req.params.issueId,
-    req.params.labelId
+    req.params.labelId,
+    req.user.id
   );
 
   return send_success(res, 200, "Label attached to issue.", issue);
@@ -96,7 +99,8 @@ export const detach_label = async_handler(async (req, res) => {
   const issue = await remove_label_from_issue(
     req.project,
     req.params.issueId,
-    req.params.labelId
+    req.params.labelId,
+    req.user.id
   );
 
   return send_success(res, 200, "Label detached from issue.", issue);

@@ -20,6 +20,10 @@ import {
   list_column_issue_positions,
   delete_issue,
 } from "../models/issue.model.js";
+import {
+  log_issue_activity,
+  log_issue_activities_bulk,
+} from "./activity.service.js";
 
 export const ISSUE_TYPES = Object.freeze(["bug", "feature", "task"]);
 export const ISSUE_STATUSES = Object.freeze([
@@ -55,6 +59,17 @@ export const LABEL_MATCH_MODES = Object.freeze(["any", "all"]);
 const MIN_POSITION_GAP = 1e-6;
 const POSITION_STEP = 1024;
 
+const TRACKED_DIFF_FIELDS = [
+  { field: "status", action: "status_changed" },
+  { field: "priority", action: "priority_changed" },
+  { field: "type", action: "type_changed" },
+  { field: "severity", action: "severity_changed" },
+  { field: "assignee_id", action: "assignee_changed" },
+  { field: "story_points", action: "story_points_changed" },
+  { field: "due_date", action: "due_date_changed" },
+  { field: "title", action: "title_updated" },
+];
+
 const parse_csv_list = (value) => {
   if (!value || typeof value !== "string") {
     return null;
@@ -64,6 +79,15 @@ const parse_csv_list = (value) => {
     .map((item) => item.trim())
     .filter(Boolean);
   return items.length > 0 ? [...new Set(items)] : null;
+};
+
+const normalize_comparable_value = (field, value) => {
+  if (value === undefined || value === null) return null;
+  if (field === "due_date") {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toISOString();
+  }
+  return value;
 };
 
 const ensure_assignee_is_member = async (project_id, assignee_id, db_client) => {
@@ -171,6 +195,22 @@ export const create_new_issue = async (project, reporter_id, payload) => {
       await replace_issue_labels(created.id, unique_label_ids, client);
     }
 
+    await log_issue_activity(
+      {
+        issue_id: created.id,
+        actor_id: reporter_id,
+        action: "issue_created",
+        metadata: {
+          issue_key,
+          type: payload.type || "task",
+          status: target_status,
+          priority: payload.priority || "medium",
+          assignee_id: payload.assignee_id ?? null,
+        },
+      },
+      client
+    );
+
     return find_issue_by_id(created.id, project.id, client);
   });
 };
@@ -251,7 +291,12 @@ export const get_issue_details_by_key = async (project_id, raw_key) => {
   return issue;
 };
 
-export const update_issue_details = async (project, issue_id, payload) => {
+export const update_issue_details = async (
+  project,
+  issue_id,
+  actor_id,
+  payload
+) => {
   if (project.is_archived) {
     throw ApiError.bad_request(
       "Cannot update issues in an archived project.",
@@ -319,11 +364,80 @@ export const update_issue_details = async (project, issue_id, payload) => {
       );
     }
 
+    const activities = [];
+
+    for (const { field, action } of TRACKED_DIFF_FIELDS) {
+      if (updates[field] !== undefined) {
+        const old_val = normalize_comparable_value(field, existing[field]);
+        const new_val = normalize_comparable_value(field, updates[field]);
+        if (old_val !== new_val) {
+          activities.push({
+            issue_id,
+            actor_id,
+            action,
+            metadata: {
+              field,
+              old_value: old_val,
+              new_value: new_val,
+            },
+          });
+        }
+      }
+    }
+
+    if (
+      updates.description !== undefined &&
+      updates.description !== existing.description
+    ) {
+      activities.push({
+        issue_id,
+        actor_id,
+        action: "description_updated",
+        metadata: { field: "description" },
+      });
+    }
+
+    if (
+      updates.reproduction_steps !== undefined &&
+      updates.reproduction_steps !== existing.reproduction_steps
+    ) {
+      activities.push({
+        issue_id,
+        actor_id,
+        action: "reproduction_steps_updated",
+        metadata: { field: "reproduction_steps" },
+      });
+    }
+
     if (unique_label_ids !== undefined) {
+      const old_label_ids = (existing.labels || []).map((l) => l.id).sort();
+      const new_label_ids = [...unique_label_ids].sort();
+      if (JSON.stringify(old_label_ids) !== JSON.stringify(new_label_ids)) {
+        activities.push({
+          issue_id,
+          actor_id,
+          action: "labels_updated",
+          metadata: {
+            old_label_ids,
+            new_label_ids,
+          },
+        });
+      }
       await replace_issue_labels(issue_id, unique_label_ids, client);
     }
 
-    return update_issue(issue_id, project.id, updates, client);
+    const updated_issue = await update_issue(
+      issue_id,
+      project.id,
+      updates,
+      client
+    );
+
+    if (activities.length > 0) {
+      await log_issue_activities_bulk(activities, client);
+    }
+
+    return updated_issue;
   });
 };
 
@@ -409,6 +523,7 @@ const compute_kanban_position = async (
 export const move_kanban_issue = async (
   project,
   issue_id,
+  actor_id,
   { status, prev_position = null, next_position = null }
 ) => {
   if (project.is_archived) {
@@ -434,7 +549,7 @@ export const move_kanban_issue = async (
       client
     );
 
-    return update_issue(
+    const moved_issue = await update_issue(
       issue_id,
       project.id,
       {
@@ -443,6 +558,24 @@ export const move_kanban_issue = async (
       },
       client
     );
+
+    if (existing.status !== status) {
+      await log_issue_activity(
+        {
+          issue_id,
+          actor_id,
+          action: "status_changed",
+          metadata: {
+            field: "status",
+            old_value: existing.status,
+            new_value: status,
+          },
+        },
+        client
+      );
+    }
+
+    return moved_issue;
   });
 };
 
@@ -481,7 +614,12 @@ export const delete_existing_issue = async (
   });
 };
 
-export const add_label_to_issue = async (project, issue_id, label_id) => {
+export const add_label_to_issue = async (
+  project,
+  issue_id,
+  label_id,
+  actor_id
+) => {
   if (project.is_archived) {
     throw ApiError.bad_request(
       "Cannot modify issues in an archived project.",
@@ -502,11 +640,30 @@ export const add_label_to_issue = async (project, issue_id, label_id) => {
     throw ApiError.not_found("Label not found in this project.", "LABEL_NOT_FOUND");
   }
 
+  const already_attached = (issue.labels || []).some((l) => l.id === label_id);
   await attach_label_to_issue(issue_id, label_id);
+
+  if (!already_attached) {
+    await log_issue_activity({
+      issue_id,
+      actor_id,
+      action: "label_added",
+      metadata: {
+        label_id: label.id,
+        label_name: label.name,
+      },
+    });
+  }
+
   return find_issue_by_id(issue_id, project.id);
 };
 
-export const remove_label_from_issue = async (project, issue_id, label_id) => {
+export const remove_label_from_issue = async (
+  project,
+  issue_id,
+  label_id,
+  actor_id
+) => {
   if (project.is_archived) {
     throw ApiError.bad_request(
       "Cannot modify issues in an archived project.",
@@ -520,6 +677,20 @@ export const remove_label_from_issue = async (project, issue_id, label_id) => {
     throw ApiError.not_found("Issue not found.", "ISSUE_NOT_FOUND");
   }
 
-  await detach_label_from_issue(issue_id, label_id);
+  const removed_label = (issue.labels || []).find((l) => l.id === label_id);
+  const detached = await detach_label_from_issue(issue_id, label_id);
+
+  if (detached && removed_label) {
+    await log_issue_activity({
+      issue_id,
+      actor_id,
+      action: "label_removed",
+      metadata: {
+        label_id: removed_label.id,
+        label_name: removed_label.name,
+      },
+    });
+  }
+
   return find_issue_by_id(issue_id, project.id);
 };
