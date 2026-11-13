@@ -41,9 +41,30 @@ export const ISSUE_SEVERITIES = Object.freeze([
   "critical",
   "blocker",
 ]);
+export const ISSUE_SORT_FIELDS = Object.freeze([
+  "position",
+  "created_at",
+  "updated_at",
+  "priority",
+  "due_date",
+  "relevance",
+]);
+export const SORT_ORDERS = Object.freeze(["asc", "desc"]);
+export const LABEL_MATCH_MODES = Object.freeze(["any", "all"]);
 
 const MIN_POSITION_GAP = 1e-6;
 const POSITION_STEP = 1024;
+
+const parse_csv_list = (value) => {
+  if (!value || typeof value !== "string") {
+    return null;
+  }
+  const items = value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return items.length > 0 ? [...new Set(items)] : null;
+};
 
 const ensure_assignee_is_member = async (project_id, assignee_id, db_client) => {
   if (!assignee_id) {
@@ -156,14 +177,49 @@ export const create_new_issue = async (project, reporter_id, payload) => {
 
 export const get_project_issues = async (
   project_id,
-  { status = null, page = 1, limit = 50 }
+  current_user_id,
+  filters
 ) => {
-  const safe_page = Math.max(1, page);
-  const safe_limit = Math.min(200, Math.max(1, limit));
+  const safe_page = Math.max(1, filters.page || 1);
+  const safe_limit = Math.min(200, Math.max(1, filters.limit || 50));
   const offset = (safe_page - 1) * safe_limit;
 
+  let resolved_assignee_id = null;
+  let unassigned_only = false;
+
+  if (filters.assignee_id === "unassigned") {
+    unassigned_only = true;
+  } else if (filters.assignee_id === "me") {
+    resolved_assignee_id = current_user_id;
+  } else if (filters.assignee_id) {
+    resolved_assignee_id = filters.assignee_id;
+  }
+
+  let resolved_reporter_id = null;
+  if (filters.reporter_id === "me") {
+    resolved_reporter_id = current_user_id;
+  } else if (filters.reporter_id) {
+    resolved_reporter_id = filters.reporter_id;
+  }
+
+  const parsed_label_ids = parse_csv_list(filters.label_ids);
+
   const { issues, total } = await list_project_issues(project_id, {
-    status,
+    statuses: parse_csv_list(filters.status),
+    priorities: parse_csv_list(filters.priority),
+    types: parse_csv_list(filters.type),
+    severities: parse_csv_list(filters.severity),
+    assignee_id: resolved_assignee_id,
+    unassigned_only,
+    reporter_id: resolved_reporter_id,
+    label_ids: parsed_label_ids,
+    label_match: filters.label_match || "any",
+    due_before: filters.due_before || null,
+    due_after: filters.due_after || null,
+    overdue: Boolean(filters.overdue),
+    search_query: filters.q ? filters.q.trim() : null,
+    sort_by: filters.sort_by,
+    sort_order: filters.sort_order || "asc",
     limit: safe_limit,
     offset,
   });
@@ -295,7 +351,6 @@ const compute_kanban_position = async (
       return (prev_position + next_position) / 2;
     }
 
-    // Gap exhausted: rebalance column and compute midpoint from fresh neighbors
     await rebalance_column_positions(project_id, target_status, client);
     const column_items = await list_column_issue_positions(
       project_id,

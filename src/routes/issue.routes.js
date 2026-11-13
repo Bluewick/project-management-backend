@@ -6,6 +6,9 @@ import {
   ISSUE_STATUSES,
   ISSUE_PRIORITIES,
   ISSUE_SEVERITIES,
+  ISSUE_SORT_FIELDS,
+  SORT_ORDERS,
+  LABEL_MATCH_MODES,
 } from "../services/issue.service.js";
 import {
   create_issue,
@@ -38,7 +41,55 @@ const validate_uuid_array = (items) => {
 
 const validate_iso_date = (value) => {
   if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
-    return "due_date must be a valid ISO 8601 date string.";
+    return "Must be a valid ISO 8601 date string.";
+  }
+  return null;
+};
+
+const validate_csv_enum = (allowed_values, field_name) => {
+  return (value) => {
+    const items = value
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (items.length === 0) {
+      return `${field_name} cannot be empty.`;
+    }
+    for (const item of items) {
+      if (!allowed_values.includes(item)) {
+        return `${field_name} values must be among: ${allowed_values.join(", ")}.`;
+      }
+    }
+    return null;
+  };
+};
+
+const validate_user_filter = (field_name, allow_unassigned) => {
+  return (value) => {
+    if (value === "me") return null;
+    if (allow_unassigned && value === "unassigned") return null;
+    if (UUID_REGEX.test(value)) return null;
+    return allow_unassigned
+      ? `${field_name} must be a valid UUID, 'me', or 'unassigned'.`
+      : `${field_name} must be a valid UUID or 'me'.`;
+  };
+};
+
+const validate_csv_uuids = (value) => {
+  const items = value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (items.length === 0) {
+    return "label_ids cannot be empty.";
+  }
+  if (items.length > 20) {
+    return "Cannot filter by more than 20 labels at once.";
+  }
+  for (const id of items) {
+    if (!UUID_REGEX.test(id)) {
+      return "All label_ids must be valid UUIDs.";
+    }
   }
   return null;
 };
@@ -48,7 +99,69 @@ const list_issues_schema = {
     projectId: { required: true, type: "uuid" },
   },
   query: {
-    status: { required: false, type: "string", enum: ISSUE_STATUSES },
+    status: {
+      required: false,
+      type: "string",
+      trim: true,
+      custom: validate_csv_enum(ISSUE_STATUSES, "status"),
+    },
+    priority: {
+      required: false,
+      type: "string",
+      trim: true,
+      custom: validate_csv_enum(ISSUE_PRIORITIES, "priority"),
+    },
+    type: {
+      required: false,
+      type: "string",
+      trim: true,
+      custom: validate_csv_enum(ISSUE_TYPES, "type"),
+    },
+    severity: {
+      required: false,
+      type: "string",
+      trim: true,
+      custom: validate_csv_enum(ISSUE_SEVERITIES, "severity"),
+    },
+    assignee_id: {
+      required: false,
+      type: "string",
+      trim: true,
+      custom: validate_user_filter("assignee_id", true),
+    },
+    reporter_id: {
+      required: false,
+      type: "string",
+      trim: true,
+      custom: validate_user_filter("reporter_id", false),
+    },
+    label_ids: {
+      required: false,
+      type: "string",
+      trim: true,
+      custom: validate_csv_uuids,
+    },
+    label_match: {
+      required: false,
+      type: "string",
+      enum: LABEL_MATCH_MODES,
+    },
+    due_before: {
+      required: false,
+      type: "string",
+      trim: true,
+      custom: validate_iso_date,
+    },
+    due_after: {
+      required: false,
+      type: "string",
+      trim: true,
+      custom: validate_iso_date,
+    },
+    overdue: { required: false, type: "boolean" },
+    q: { required: false, type: "string", trim: true, min: 1, max: 200 },
+    sort_by: { required: false, type: "string", enum: ISSUE_SORT_FIELDS },
+    sort_order: { required: false, type: "string", enum: SORT_ORDERS },
     page: { required: false, type: "number", min: 1 },
     limit: { required: false, type: "number", min: 1, max: 200 },
   },

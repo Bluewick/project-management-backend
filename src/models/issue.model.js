@@ -61,6 +61,53 @@ const ISSUE_GROUP_BY = `
     asg.id, asg.full_name, asg.email, asg.avatar_url
 `;
 
+const escape_like_pattern = (value) => {
+  return value.replace(/[\\%_]/g, (match) => `\\${match}`);
+};
+
+const build_sort_clause = (sort_by, sort_order, search_param_idx) => {
+  const direction = sort_order === "desc" ? "DESC" : "ASC";
+
+  switch (sort_by) {
+    case "created_at":
+      return `ORDER BY i.created_at ${direction}, i.issue_number ${direction}`;
+    case "updated_at":
+      return `ORDER BY i.updated_at ${direction}, i.created_at DESC`;
+    case "due_date":
+      return `ORDER BY i.due_date ${direction} NULLS LAST, i.created_at DESC`;
+    case "priority":
+      return `
+        ORDER BY
+          CASE i.priority
+            WHEN 'critical' THEN 4
+            WHEN 'high' THEN 3
+            WHEN 'medium' THEN 2
+            ELSE 1
+          END ${direction},
+          i.created_at DESC
+      `;
+    case "relevance":
+      if (search_param_idx !== null) {
+        return `
+          ORDER BY
+            ts_rank(i.search_vector, plainto_tsquery('english', $${search_param_idx})) DESC,
+            i.updated_at DESC
+        `;
+      }
+      return `ORDER BY i.updated_at DESC`;
+    case "position":
+    default:
+      if (sort_by === undefined && search_param_idx !== null) {
+        return `
+          ORDER BY
+            ts_rank(i.search_vector, plainto_tsquery('english', $${search_param_idx})) DESC,
+            i.updated_at DESC
+        `;
+      }
+      return `ORDER BY i.status ASC, i.position ${direction}, i.created_at ASC`;
+  }
+};
+
 export const increment_project_issue_counter = async (project_id, db_client) => {
   const sql = `
     UPDATE projects
@@ -224,18 +271,121 @@ export const find_issue_by_key = async (
 
 export const list_project_issues = async (
   project_id,
-  { status = null, limit = 50, offset = 0 }
+  {
+    statuses = null,
+    priorities = null,
+    types = null,
+    severities = null,
+    assignee_id = null,
+    unassigned_only = false,
+    reporter_id = null,
+    label_ids = null,
+    label_match = "any",
+    due_before = null,
+    due_after = null,
+    overdue = false,
+    search_query = null,
+    sort_by = undefined,
+    sort_order = "asc",
+    limit = 50,
+    offset = 0,
+  }
 ) => {
   const conditions = ["i.project_id = $1"];
   const params = [project_id];
   let idx = 2;
+  let search_param_idx = null;
 
-  if (status) {
-    conditions.push(`i.status = $${idx++}`);
-    params.push(status);
+  if (statuses && statuses.length > 0) {
+    conditions.push(`i.status = ANY($${idx++}::varchar[])`);
+    params.push(statuses);
+  }
+
+  if (priorities && priorities.length > 0) {
+    conditions.push(`i.priority = ANY($${idx++}::varchar[])`);
+    params.push(priorities);
+  }
+
+  if (types && types.length > 0) {
+    conditions.push(`i.type = ANY($${idx++}::varchar[])`);
+    params.push(types);
+  }
+
+  if (severities && severities.length > 0) {
+    conditions.push(`i.severity = ANY($${idx++}::varchar[])`);
+    params.push(severities);
+  }
+
+  if (unassigned_only) {
+    conditions.push(`i.assignee_id IS NULL`);
+  } else if (assignee_id) {
+    conditions.push(`i.assignee_id = $${idx++}`);
+    params.push(assignee_id);
+  }
+
+  if (reporter_id) {
+    conditions.push(`i.reporter_id = $${idx++}`);
+    params.push(reporter_id);
+  }
+
+  if (label_ids && label_ids.length > 0) {
+    const label_param = idx++;
+    params.push(label_ids);
+
+    if (label_match === "all") {
+      const count_param = idx++;
+      params.push(label_ids.length);
+      conditions.push(`
+        (
+          SELECT COUNT(DISTINCT il2.label_id)
+          FROM issue_labels il2
+          WHERE il2.issue_id = i.id AND il2.label_id = ANY($${label_param}::uuid[])
+        ) = $${count_param}
+      `);
+    } else {
+      conditions.push(`
+        EXISTS (
+          SELECT 1
+          FROM issue_labels il2
+          WHERE il2.issue_id = i.id AND il2.label_id = ANY($${label_param}::uuid[])
+        )
+      `);
+    }
+  }
+
+  if (due_after) {
+    conditions.push(`i.due_date >= $${idx++}`);
+    params.push(due_after);
+  }
+
+  if (due_before) {
+    conditions.push(`i.due_date <= $${idx++}`);
+    params.push(due_before);
+  }
+
+  if (overdue) {
+    conditions.push(
+      `i.due_date IS NOT NULL AND i.due_date < CURRENT_TIMESTAMP AND i.status <> 'done'`
+    );
+  }
+
+  if (search_query) {
+    search_param_idx = idx++;
+    const like_param_idx = idx++;
+    params.push(search_query);
+    params.push(`%${escape_like_pattern(search_query)}%`);
+
+    conditions.push(`
+      (
+        i.search_vector @@ plainto_tsquery('english', $${search_param_idx})
+        OR i.issue_key ILIKE $${like_param_idx} ESCAPE '\\'
+        OR i.title ILIKE $${like_param_idx} ESCAPE '\\'
+      )
+    `);
   }
 
   const where_clause = `WHERE ${conditions.join(" AND ")}`;
+  const order_clause = build_sort_clause(sort_by, sort_order, search_param_idx);
 
   const count_sql = `
     SELECT COUNT(*)::INTEGER AS total
@@ -243,12 +393,15 @@ export const list_project_issues = async (
     ${where_clause}
   `;
 
+  const limit_param_idx = idx++;
+  const offset_param_idx = idx++;
+
   const data_sql = `
     ${ISSUE_SELECT_WITH_RELATIONS}
     ${where_clause}
     ${ISSUE_GROUP_BY}
-    ORDER BY i.status ASC, i.position ASC, i.created_at ASC
-    LIMIT $${idx++} OFFSET $${idx}
+    ${order_clause}
+    LIMIT $${limit_param_idx} OFFSET $${offset_param_idx}
   `;
 
   const [count_result, data_result] = await Promise.all([

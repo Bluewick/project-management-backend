@@ -19,12 +19,11 @@ export const create_issue = async_handler(async (req, res) => {
 });
 
 export const list_issues = async_handler(async (req, res) => {
-  const { status, page = 1, limit = 50 } = req.query;
-  const result = await get_project_issues(req.params.projectId, {
-    status,
-    page,
-    limit,
-  });
+  const result = await get_project_issues(
+    req.params.projectId,
+    req.user.id,
+    req.query
+  );
 
   return send_success(
     res,
