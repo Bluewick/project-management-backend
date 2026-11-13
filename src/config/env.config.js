@@ -26,6 +26,8 @@ const is_neon_or_prod =
   process.env.DATABASE_URL.includes("neon.tech") ||
   process.env.NODE_ENV === "production";
 
+const aws_s3_endpoint = process.env.AWS_ENDPOINT_URL_S3 || "";
+
 export const env = Object.freeze({
   node_env: process.env.NODE_ENV || "development",
   port: parse_integer(process.env.PORT, 5000),
@@ -41,4 +43,25 @@ export const env = Object.freeze({
   jwt_refresh_expires_in: process.env.JWT_REFRESH_EXPIRES_IN || "7d",
   bcrypt_salt_rounds: parse_integer(process.env.BCRYPT_SALT_ROUNDS, 12),
   invite_expires_hours: parse_integer(process.env.INVITE_EXPIRES_HOURS, 168),
+  aws_region: process.env.AWS_REGION || "",
+  aws_s3_endpoint,
+  aws_s3_force_path_style: parse_boolean(
+    process.env.AWS_S3_FORCE_PATH_STYLE,
+    Boolean(aws_s3_endpoint)
+  ),
+  aws_access_key_id: process.env.AWS_ACCESS_KEY_ID || "",
+  aws_secret_access_key: process.env.AWS_SECRET_ACCESS_KEY || "",
+  aws_s3_bucket: process.env.AWS_S3_BUCKET || "",
+  s3_presign_expires_seconds: parse_integer(
+    process.env.S3_PRESIGN_EXPIRES_SECONDS,
+    900
+  ),
+  max_attachment_size_bytes: parse_integer(
+    process.env.MAX_ATTACHMENT_SIZE_BYTES,
+    25 * 1024 * 1024
+  ),
+  max_direct_upload_size_bytes: parse_integer(
+    process.env.MAX_DIRECT_UPLOAD_SIZE_BYTES,
+    10 * 1024 * 1024
+  ),
 });

@@ -23,6 +23,7 @@ import {
 } from "../controllers/issue.controller.js";
 import comment_routes from "./comment.routes.js";
 import activity_routes from "./activity.routes.js";
+import attachment_routes from "./attachment.routes.js";
 
 const router = express.Router({ mergeParams: true });
 
@@ -338,8 +339,9 @@ router.delete(
   detach_label
 );
 
-// Nested issue comments & activity logs
+// Nested issue comments, activity logs & attachments
 router.use("/:issueId/comments", comment_routes);
 router.use("/:issueId/activity", activity_routes);
+router.use("/:issueId/attachments", attachment_routes);
 
 export default router;
