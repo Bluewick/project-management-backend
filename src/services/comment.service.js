@@ -1,5 +1,6 @@
 import { with_transaction } from "../config/db.js";
 import { ApiError } from "../utils/api_error.util.js";
+import { emit_to_issue } from "../config/socket.config.js";
 import { find_issue_by_id } from "../models/issue.model.js";
 import {
   find_mentioned_project_members,
@@ -98,7 +99,7 @@ export const add_issue_comment = async (
     );
   }
 
-  return with_transaction(async (client) => {
+  const created = await with_transaction(async (client) => {
     const issue = await find_issue_by_id(issue_id, project.id, client);
     if (!issue) {
       throw ApiError.not_found("Issue not found.", "ISSUE_NOT_FOUND");
@@ -124,7 +125,7 @@ export const add_issue_comment = async (
       client
     );
 
-    const created = await create_comment(
+    const comment = await create_comment(
       {
         issue_id,
         author_id,
@@ -141,7 +142,7 @@ export const add_issue_comment = async (
         actor_id: author_id,
         action: "comment_added",
         metadata: {
-          comment_id: created.id,
+          comment_id: comment.id,
           parent_comment_id,
           mentioned_user_ids: mentions.map((m) => m.user_id),
         },
@@ -149,8 +150,16 @@ export const add_issue_comment = async (
       client
     );
 
-    return created;
+    return comment;
   });
+
+  emit_to_issue(issue_id, "comment:added", {
+    project_id: project.id,
+    issue_id,
+    comment: created,
+  });
+
+  return created;
 };
 
 export const edit_issue_comment = async (
@@ -168,7 +177,7 @@ export const edit_issue_comment = async (
     );
   }
 
-  return with_transaction(async (client) => {
+  const updated = await with_transaction(async (client) => {
     const issue = await find_issue_by_id(issue_id, project.id, client);
     if (!issue) {
       throw ApiError.not_found("Issue not found.", "ISSUE_NOT_FOUND");
@@ -199,6 +208,14 @@ export const edit_issue_comment = async (
       client
     );
   });
+
+  emit_to_issue(issue_id, "comment:updated", {
+    project_id: project.id,
+    issue_id,
+    comment: updated,
+  });
+
+  return updated;
 };
 
 export const remove_issue_comment = async (
@@ -215,7 +232,7 @@ export const remove_issue_comment = async (
     );
   }
 
-  return with_transaction(async (client) => {
+  const deleted = await with_transaction(async (client) => {
     const issue = await find_issue_by_id(issue_id, project.id, client);
     if (!issue) {
       throw ApiError.not_found("Issue not found.", "ISSUE_NOT_FOUND");
@@ -238,4 +255,13 @@ export const remove_issue_comment = async (
 
     return delete_comment(comment_id, issue_id, client);
   });
+
+  emit_to_issue(issue_id, "comment:deleted", {
+    project_id: project.id,
+    issue_id,
+    comment_id: deleted.id,
+    actor_id: acting_member.user_id,
+  });
+
+  return deleted;
 };

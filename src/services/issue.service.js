@@ -1,5 +1,11 @@
 import { with_transaction } from "../config/db.js";
 import { ApiError } from "../utils/api_error.util.js";
+import {
+  emit_to_project,
+  emit_to_rooms,
+  get_project_room,
+  get_issue_room,
+} from "../config/socket.config.js";
 import { find_project_member } from "../models/project_member.model.js";
 import {
   find_label_by_id,
@@ -137,7 +143,7 @@ export const create_new_issue = async (project, reporter_id, payload) => {
     );
   }
 
-  return with_transaction(async (client) => {
+  const created_issue = await with_transaction(async (client) => {
     await ensure_assignee_is_member(project.id, payload.assignee_id, client);
     const unique_label_ids = await ensure_labels_belong_to_project(
       project.id,
@@ -213,6 +219,14 @@ export const create_new_issue = async (project, reporter_id, payload) => {
 
     return find_issue_by_id(created.id, project.id, client);
   });
+
+  emit_to_project(project.id, "issue:created", {
+    project_id: project.id,
+    actor_id: reporter_id,
+    issue: created_issue,
+  });
+
+  return created_issue;
 };
 
 export const get_project_issues = async (
@@ -305,7 +319,7 @@ export const update_issue_details = async (
     );
   }
 
-  return with_transaction(async (client) => {
+  const updated_issue = await with_transaction(async (client) => {
     const existing = await find_issue_by_id(issue_id, project.id, client);
     if (!existing) {
       throw ApiError.not_found("Issue not found.", "ISSUE_NOT_FOUND");
@@ -426,19 +440,26 @@ export const update_issue_details = async (
       await replace_issue_labels(issue_id, unique_label_ids, client);
     }
 
-    const updated_issue = await update_issue(
-      issue_id,
-      project.id,
-      updates,
-      client
-    );
+    const result = await update_issue(issue_id, project.id, updates, client);
 
     if (activities.length > 0) {
       await log_issue_activities_bulk(activities, client);
     }
 
-    return updated_issue;
+    return result;
   });
+
+  emit_to_rooms(
+    [get_project_room(project.id), get_issue_room(issue_id)],
+    "issue:updated",
+    {
+      project_id: project.id,
+      actor_id,
+      issue: updated_issue,
+    }
+  );
+
+  return updated_issue;
 };
 
 const compute_kanban_position = async (
@@ -534,49 +555,67 @@ export const move_kanban_issue = async (
     );
   }
 
-  return with_transaction(async (client) => {
-    const existing = await find_issue_by_id(issue_id, project.id, client);
-    if (!existing) {
-      throw ApiError.not_found("Issue not found.", "ISSUE_NOT_FOUND");
-    }
+  const { previous_status, moved_issue } = await with_transaction(
+    async (client) => {
+      const existing = await find_issue_by_id(issue_id, project.id, client);
+      if (!existing) {
+        throw ApiError.not_found("Issue not found.", "ISSUE_NOT_FOUND");
+      }
 
-    const new_position = await compute_kanban_position(
-      project.id,
-      status,
-      issue_id,
-      prev_position,
-      next_position,
-      client
-    );
-
-    const moved_issue = await update_issue(
-      issue_id,
-      project.id,
-      {
+      const new_position = await compute_kanban_position(
+        project.id,
         status,
-        position: new_position,
-      },
-      client
-    );
+        issue_id,
+        prev_position,
+        next_position,
+        client
+      );
 
-    if (existing.status !== status) {
-      await log_issue_activity(
+      const updated = await update_issue(
+        issue_id,
+        project.id,
         {
-          issue_id,
-          actor_id,
-          action: "status_changed",
-          metadata: {
-            field: "status",
-            old_value: existing.status,
-            new_value: status,
-          },
+          status,
+          position: new_position,
         },
         client
       );
-    }
 
-    return moved_issue;
-  });
+      if (existing.status !== status) {
+        await log_issue_activity(
+          {
+            issue_id,
+            actor_id,
+            action: "status_changed",
+            metadata: {
+              field: "status",
+              old_value: existing.status,
+              new_value: status,
+            },
+          },
+          client
+        );
+      }
+
+      return {
+        previous_status: existing.status,
+        moved_issue: updated,
+      };
+    }
+  );
+
+  emit_to_rooms(
+    [get_project_room(project.id), get_issue_room(issue_id)],
+    "issue:moved",
+    {
+      project_id: project.id,
+      actor_id,
+      previous_status,
+      issue: moved_issue,
+    }
+  );
+
+  return moved_issue;
 };
 
 export const delete_existing_issue = async (
@@ -592,7 +631,7 @@ export const delete_existing_issue = async (
     );
   }
 
-  return with_transaction(async (client) => {
+  const deleted = await with_transaction(async (client) => {
     const existing = await find_issue_by_id(issue_id, project.id, client);
     if (!existing) {
       throw ApiError.not_found("Issue not found.", "ISSUE_NOT_FOUND");
@@ -612,6 +651,19 @@ export const delete_existing_issue = async (
 
     return delete_issue(issue_id, project.id, client);
   });
+
+  emit_to_rooms(
+    [get_project_room(project.id), get_issue_room(issue_id)],
+    "issue:deleted",
+    {
+      project_id: project.id,
+      actor_id: acting_member.user_id,
+      issue_id: deleted.id,
+      issue_key: deleted.issue_key,
+    }
+  );
+
+  return deleted;
 };
 
 export const add_label_to_issue = async (
@@ -655,7 +707,19 @@ export const add_label_to_issue = async (
     });
   }
 
-  return find_issue_by_id(issue_id, project.id);
+  const updated_issue = await find_issue_by_id(issue_id, project.id);
+
+  emit_to_rooms(
+    [get_project_room(project.id), get_issue_room(issue_id)],
+    "issue:updated",
+    {
+      project_id: project.id,
+      actor_id,
+      issue: updated_issue,
+    }
+  );
+
+  return updated_issue;
 };
 
 export const remove_label_from_issue = async (
@@ -692,5 +756,17 @@ export const remove_label_from_issue = async (
     });
   }
 
-  return find_issue_by_id(issue_id, project.id);
+  const updated_issue = await find_issue_by_id(issue_id, project.id);
+
+  emit_to_rooms(
+    [get_project_room(project.id), get_issue_room(issue_id)],
+    "issue:updated",
+    {
+      project_id: project.id,
+      actor_id,
+      issue: updated_issue,
+    }
+  );
+
+  return updated_issue;
 };

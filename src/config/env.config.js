@@ -64,4 +64,9 @@ export const env = Object.freeze({
     process.env.MAX_DIRECT_UPLOAD_SIZE_BYTES,
     10 * 1024 * 1024
   ),
+  enable_socket_io: parse_boolean(process.env.ENABLE_SOCKET_IO, true),
+  cleanup_interval_ms: parse_integer(
+    process.env.CLEANUP_INTERVAL_MS,
+    60 * 60 * 1000
+  ),
 });

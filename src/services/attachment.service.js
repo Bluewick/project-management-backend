@@ -3,6 +3,7 @@ import path from "node:path";
 import { env } from "../config/env.config.js";
 import { with_transaction } from "../config/db.js";
 import { ApiError } from "../utils/api_error.util.js";
+import { emit_to_issue } from "../config/socket.config.js";
 import {
   generate_presigned_put_url,
   generate_presigned_get_url,
@@ -134,7 +135,7 @@ export const confirm_presigned_upload = async (
   let s3_head;
   try {
     s3_head = await head_s3_object(existing.s3_key);
-  } catch (error) {
+  } catch {
     throw ApiError.bad_request(
       "File has not been uploaded to S3 yet.",
       [],
@@ -181,7 +182,15 @@ export const confirm_presigned_upload = async (
     return updated;
   });
 
-  return attach_signed_download_url(confirmed);
+  const hydrated = await attach_signed_download_url(confirmed);
+
+  emit_to_issue(issue_id, "attachment:added", {
+    project_id: project.id,
+    issue_id,
+    attachment: hydrated,
+  });
+
+  return hydrated;
 };
 
 export const direct_upload_issue_attachment = async (
@@ -247,9 +256,16 @@ export const direct_upload_issue_attachment = async (
       return attachment;
     });
 
-    return attach_signed_download_url(created);
+    const hydrated = await attach_signed_download_url(created);
+
+    emit_to_issue(issue_id, "attachment:added", {
+      project_id: project.id,
+      issue_id,
+      attachment: hydrated,
+    });
+
+    return hydrated;
   } catch (error) {
-    // Compensating cleanup if DB insert fails after S3 upload
     await delete_s3_object(s3_key).catch(() => {});
     throw error;
   }
@@ -301,10 +317,10 @@ export const remove_issue_attachment = async (
 
   await delete_s3_object(existing.s3_key);
 
-  return with_transaction(async (client) => {
-    const deleted = await delete_attachment(attachment_id, issue_id, client);
+  const deleted = await with_transaction(async (client) => {
+    const result = await delete_attachment(attachment_id, issue_id, client);
 
-    if (deleted && existing.status === "uploaded") {
+    if (result && existing.status === "uploaded") {
       await log_issue_activity(
         {
           issue_id,
@@ -319,6 +335,17 @@ export const remove_issue_attachment = async (
       );
     }
 
-    return deleted;
+    return result;
   });
+
+  if (deleted) {
+    emit_to_issue(issue_id, "attachment:deleted", {
+      project_id: project.id,
+      issue_id,
+      attachment_id: deleted.id,
+      actor_id: acting_member.user_id,
+    });
+  }
+
+  return deleted;
 };
